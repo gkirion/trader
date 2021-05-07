@@ -7,6 +7,7 @@ import sys
 import time
 import config
 import broker
+import json
 
 api_base_url = config.api_base_url
 api_key = config.api_key
@@ -25,7 +26,14 @@ logging.info("starting trader...")
 logging.info("api base url: {api_base_url}, samples per min: {samples_per_min}, symbol: {symbol}, interval points: {interval_points}".format(api_base_url = api_base_url, samples_per_min = samples_per_min, symbol = symbol, interval_points = interval_points))
 
 sliding_window = SlidingWindow(max(interval_points) * 2 + 1)
-previous_order = {'type': 'BUY', 'price': 1.16}
+try:
+    with open('previous_order.txt') as file:
+        previous_order = json.loads(file.readline())
+        logging.info("loaded previous order: {previous_order}".format(previous_order = previous_order))
+except FileNotFoundError as e:
+    previous_order = {'type': 'BUY', 'price': 1.16}
+    logging.warning("{exception}, using default: {default}".format(exception = e, default = previous_order))
+
 
 while True:
     number_of_samples = 0
@@ -67,8 +75,10 @@ while True:
                                 logging.info(response.json())
                             previous_order['type'] = 'BUY'
                             previous_order['price'] = float(response.json()['price'])
+                            with open('previous_order.txt', 'w') as file:
+                                file.write(json.dumps(previous_order))
                         except Exception as e:
-                            logging.warn(e)
+                            logging.warning(e)
                     else:
                         logging.info("previous order price {previous_order_price} is lower or equal to current order price {current_order_price}, skipping".format(previous_order_price = previous_order['price'], current_order_price = new_order['price']))
                 else:
@@ -86,8 +96,10 @@ while True:
                                 logging.info(response.json())
                             previous_order['type'] = 'SELL'
                             previous_order['price'] = float(response.json()['price'])
+                            with open('previous_order.txt', 'w') as file:
+                                file.write(json.dumps(previous_order))
                         except Exception as e:
-                            logging.warn(e)
+                            logging.warning(e)
                     else:
                         logging.info("previous order price {previous_order_price} is higher or equal to current order price {current_order_price}, skipping".format(previous_order_price = previous_order['price'], current_order_price = new_order['price']))
                 else:
