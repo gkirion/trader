@@ -53,3 +53,14 @@ def query_order(symbol, order_id):
     if response.status_code != 200:
         raise Exception({'code': response.json()['code'], 'msg': response.json()['msg']})
     return response
+
+def cancel_order(symbol, order_id):
+    timestamp = int(str(int(datetime.now().timestamp())) + '000')
+    params = "symbol={symbol}&orderId={order_id}&timestamp={timestamp}".format(symbol = symbol, order_id = order_id, timestamp = timestamp).encode('UTF-8')
+    signature = hmac.new(secret_key, params, hashlib.sha256).hexdigest()
+    logging.info("params: {params}, signature: {signature}".format(params = params, signature = signature))
+    response = requests.delete(api_base_url + "/v3/order", params={'symbol': symbol, 'orderId': order_id, 'timestamp': timestamp, 'signature': signature}, headers={'X-MBX-APIKEY': api_key})
+    logging.info(response.json())
+    if response.status_code != 200:
+        raise Exception({'code': response.json()['code'], 'msg': response.json()['msg']})
+    return response

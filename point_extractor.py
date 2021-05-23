@@ -1,9 +1,7 @@
 def extract_points(sliding_window, edge_sizes):
-    if len(edge_sizes) == 0:
-        return {}
     if len(sliding_window) < max(edge_sizes) * 2 + 1:
-        raise Exception('Not enough data points for all edge sizes')
-        
+        raise Exception("size of sliding window must be greater than or equal to 2 * max_edge_size + 1")
+
     size_datapoints = {}
     sum = {}
     for edge_size in edge_sizes:

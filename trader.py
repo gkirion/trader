@@ -16,6 +16,7 @@ samples_per_min = config.samples_per_min
 symbol = config.symbol
 interval_points = config.interval_points
 threshold = config.threshold
+order_threshold = config.order_threshold
 
 logging.basicConfig(filename = 'trader_log.txt', format = '%(asctime)s - %(module)s - %(levelname)s - %(message)s', level = logging.INFO)
 consoleHandler = logging.StreamHandler()
@@ -24,8 +25,9 @@ logging.getLogger().addHandler(consoleHandler)
 
 logging.info("starting trader...")
 logging.info("api base url: {api_base_url}, samples per min: {samples_per_min}, symbol: {symbol}, interval points: {interval_points}".format(api_base_url = api_base_url, samples_per_min = samples_per_min, symbol = symbol, interval_points = interval_points))
-
 sliding_window = SlidingWindow(max(interval_points) * 2 + 1)
+
+# load previous order
 try:
     with open('previous_order.txt') as file:
         previous_order = json.loads(file.readline())
@@ -35,72 +37,82 @@ except FileNotFoundError as e:
     logging.warning("{exception}, using default: {default}".format(exception = e, default = previous_order))
 
 
-while True:
+def extract_minute_average(samples_per_min = 10):
     number_of_samples = 0
     avg_price = 0.0
     while number_of_samples < samples_per_min:
-        price = broker.get_symbol_price(symbol).json()['price']
-        logging.info("sample: {sample}, price: {price} eur".format(sample = number_of_samples, price = price))
-        avg_price += float(price)
-        number_of_samples += 1
-        time.sleep(60 / samples_per_min)
-
+        try:
+            time.sleep(60 / samples_per_min)
+            price = broker.get_symbol_price(symbol).json()['price']
+            logging.info("sample: {sample}, price: {price} eur".format(sample = number_of_samples, price = price))
+            avg_price += float(price)
+            number_of_samples += 1
+        except Exception as e:
+            logging.warning(e)
     avg_price = avg_price / number_of_samples
+    return avg_price
+
+
+while True:
+    avg_price = extract_minute_average(samples_per_min)
     logging.info("1 min average price: {avg_price} eur".format(avg_price = avg_price))
     sliding_window.add(avg_price)
 
-    points_to_process = list(filter(lambda point: 2 * point + 1 <= len(sliding_window), interval_points))
-    logging.info("interval points to process: {points_to_process}".format(points_to_process = points_to_process))
+    strategy = MinimumDomainFirstStrategy(interval_points, threshold)
+    logging.info("using minimum domain first strategy")
+    strategy_action = strategy.execute(sliding_window)
+    logging.info("strategy action: {strategy_action}".format(strategy_action = strategy_action))
 
-    if len(points_to_process) > 0:
-        points = point_extractor.extract_points(sliding_window, points_to_process)
-        logging.info("extracted points for each interval: {points}".format(points = points))
+    if strategy_action != None:
+        if 'status' in previous_order and 'orderId' in previous_order and previous_order['status'] != 'FILLED':
+            try:
+                response = broker.query_order('XRPEUR', previous_order['orderId']).json()
+                previous_order['status'] = response['status']
+                if response['status'] == 'FILLED':
+                    previous_order['price'] = float(response['price'])
+                    with open('previous_order.txt', 'w') as file:
+                        file.write(json.dumps(previous_order))
+            except Exception as e:
+                logging.warning(e)
 
-        strategy = MinimumDomainFirstStrategy(points, threshold)
-        logging.info("using minimum domain first strategy with threshold: {threshold}".format(threshold = threshold))
-        strategy_action = strategy.execute()
-        logging.info("strategy action: {strategy_action}".format(strategy_action = strategy_action))
-
-        if strategy_action != None:
-            new_order = {'type': strategy_action, 'price': round(avg_price, 4)}
-            if new_order['type'] == 'BUY':
-                if previous_order['type'] == None or previous_order['type'] != 'BUY':
-                    if previous_order['price'] == None or previous_order['price'] > new_order['price']:
-                        try:
-                            response = broker.place_order('XRPEUR', 'BUY', 10, round(avg_price, 4))
-                            logging.info(response.json())
-                            while response.json()['status'] != 'FILLED':
-                                time.sleep(2)
-                                response = broker.query_order('XRPEUR', response.json()['orderId'])
-                                logging.info(response.json())
-                            previous_order['type'] = 'BUY'
-                            previous_order['price'] = float(response.json()['price'])
+        new_order = {'type': strategy_action, 'price': round(float(avg_price), 4)}
+        if new_order['type'] == 'BUY':
+            if ('status' not in previous_order or previous_order['status'] == 'FILLED') and previous_order['type'] != 'BUY':
+                if previous_order['price'] > new_order['price'] * (1 + order_threshold):
+                    try:
+                        response = broker.place_order('XRPEUR', 'BUY', 10, round(float(avg_price), 4)).json()
+                        logging.info(response)
+                        previous_order['orderId'] = response['orderId']
+                        previous_order['status'] = response['status']
+                        previous_order['type'] = 'BUY'
+                        previous_order['price'] = float(response['price'])
+                        if response['status'] == 'FILLED':
                             with open('previous_order.txt', 'w') as file:
                                 file.write(json.dumps(previous_order))
-                        except Exception as e:
-                            logging.warning(e)
-                    else:
-                        logging.info("previous order price {previous_order_price} is lower or equal to current order price {current_order_price}, skipping".format(previous_order_price = previous_order['price'], current_order_price = new_order['price']))
-                else:
-                    logging.info("previous order was BUY too, skipping")
+                    except Exception as e:
+                        logging.warning(e)
 
-            elif new_order['type'] == 'SELL':
-                if previous_order['type'] != 'SELL':
-                    if previous_order['price'] < new_order['price']:
-                        try:
-                            response = broker.place_order('XRPEUR', 'SELL', 10, round(avg_price, 4))
-                            logging.info(response.json())
-                            while response.json()['status'] != 'FILLED':
-                                time.sleep(2)
-                                response = broker.query_order('XRPEUR', response.json()['orderId'])
-                                logging.info(response.json())
-                            previous_order['type'] = 'SELL'
-                            previous_order['price'] = float(response.json()['price'])
+                else:
+                    logging.info("new order price {new_order}, previous order price {previous_order}, skipping".format(new_order = new_order['price'], previous_order = previous_order['price']))
+            else:
+                logging.info("previous order was BUY too, skipping")
+
+        elif new_order['type'] == 'SELL':
+            if ('status' not in previous_order or previous_order['status'] == 'FILLED') and previous_order['type'] != 'SELL':
+                if new_order['price'] > previous_order['price'] * (1 + order_threshold):
+                    try:
+                        response = broker.place_order('XRPEUR', 'SELL', 10, round(float(avg_price), 4)).json()
+                        logging.info(response)
+                        previous_order['orderId'] = response['orderId']
+                        previous_order['status'] = response['status']
+                        previous_order['type'] = 'SELL'
+                        previous_order['price'] = float(response['price'])
+                        if response['status'] == 'FILLED':
                             with open('previous_order.txt', 'w') as file:
                                 file.write(json.dumps(previous_order))
-                        except Exception as e:
-                            logging.warning(e)
-                    else:
-                        logging.info("previous order price {previous_order_price} is higher or equal to current order price {current_order_price}, skipping".format(previous_order_price = previous_order['price'], current_order_price = new_order['price']))
+                    except Exception as e:
+                        logging.warning(e)
                 else:
-                    logging.info("previous order was SELL too, skipping")
+                    logging.info("new order price {new_order}, previous order price {previous_order}, skipping".format(new_order = new_order['price'], previous_order = previous_order['price']))
+            else:
+                logging.info("previous order was SELL too, skipping")
